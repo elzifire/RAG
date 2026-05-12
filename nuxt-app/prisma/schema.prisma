@@ -1,0 +1,161 @@
+// Prisma schema — RAG Chatbot
+// https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── Users ────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String?   @map("password_hash")
+  role         Role      @default(USER)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  sessions         ChatSession[]
+  passkeys          Passkey[]
+  grantedAccesses   UnlimitedAccess[] @relation("AdminGranted")
+
+  @@map("users")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+// ── Passkeys (WebAuthn / FIDO2) ───────────────────────────────────────────────
+
+model Passkey {
+  id              String   @id @default(cuid())
+  userId          String   @map("user_id")
+  credentialId    String   @unique @map("credential_id")
+  publicKey       Bytes    @map("public_key")
+  counter         BigInt   @default(0)
+  deviceType      String   @default("singleDevice") @map("device_type")
+  backedUp        Boolean  @default(false) @map("backed_up")
+  transports      String[] @default([])
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("passkeys")
+}
+
+// ── Chat Sessions ─────────────────────────────────────────────────────────────
+
+model ChatSession {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  name        String    @default("New Chat")
+  model       String
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages    Message[]
+  queueJobs   ChatQueueJob[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("chat_sessions")
+}
+
+// ── Messages ─────────────────────────────────────────────────────────────────
+
+model Message {
+  id          String      @id @default(cuid())
+  sessionId   String      @map("session_id")
+  role        MessageRole
+  content     String
+  model       String?     // which model produced this (null for user msgs)
+  tokenCount  Int?        @map("token_count")
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  session     ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@map("messages")
+}
+
+enum MessageRole {
+  user
+  assistant
+  system
+}
+
+// ── Queue Fallback (Redis -> DB) ────────────────────────────────────────────
+
+model ChatQueueJob {
+  id            String         @id @default(cuid())
+  sessionId     String         @map("session_id")
+  userMessageId String         @unique @map("user_message_id")
+  model         String
+  status        QueueJobStatus @default(PENDING)
+  createdAt     DateTime       @default(now()) @map("created_at")
+  startedAt     DateTime?      @map("started_at")
+  finishedAt    DateTime?      @map("finished_at")
+  errorText     String?        @map("error_text")
+
+  session       ChatSession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, status, createdAt])
+  @@map("chat_queue_jobs")
+}
+
+enum QueueJobStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+// ── Guest Sessions ────────────────────────────────────────────────────────────
+
+model GuestSession {
+  id            String   @id @default(cuid())
+  fingerprint   String   @unique
+  messageCount  Int      @default(0) @map("message_count")
+  createdAt     DateTime @default(now()) @map("created_at")
+  lastMessageAt DateTime @default(now()) @map("last_message_at")
+
+  @@map("guest_sessions")
+}
+
+// ── App Settings ──────────────────────────────────────────────────────────────
+
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by")
+
+  @@map("app_settings")
+}
+
+// ── Access Tokens (admin-issued, header-based) ────────────────────────────────
+
+model UnlimitedAccess {
+  id            String    @id @default(cuid())
+  token         String    @unique            // random hex sent as X-Access-Token header
+  label         String?                      // human-readable label for admin reference
+  grantedBy     String    @map("granted_by") // admin userId who created it
+  grantedAt     DateTime  @default(now()) @map("granted_at")
+  expiredAt     DateTime? @map("expired_at")
+  isActive      Boolean   @default(true) @map("is_active")
+  messageLimit  Int       @map("message_limit")            // max messages this token allows
+  messageCount  Int       @default(0) @map("message_count") // messages used so far
+
+  admin         User @relation("AdminGranted", fields: [grantedBy], references: [id])
+
+  @@map("unlimited_access")
+}
+
